@@ -1,0 +1,398 @@
+heat_template_version: 2014-10-16
+description: Create two subnets and a router connecting them and providing external connectivity. Create clients and servers on the subnets for automated performance testing.
+############################################################################
+############################################################################
+parameters:
+
+ ## COMMON NETWORKING PARAMETERS
+  router_name:
+    type: string
+    label: router name
+    description: router name
+    default: perf-test-router
+
+  net_ext_name:
+    type: string
+    label: External network name
+    description: External network name
+    default: EXT_FIP_net
+
+  ## SERVER NET PARAMETERS
+  server_net_name:
+    type: string
+    label: SERVER network name
+    description: The name for the network where the servers live
+    default: perf-test-server-net
+
+  server_subnet_name:
+    type: string
+    label: SERVER subnet Name
+    description: The name for the subnet where the servers live
+    default: perf-test-server-subnet
+
+  server_cidr:
+    type: string
+    label: SERVER subnet cidr
+    description: The SERVER subnet network cidr
+    default: 2.2.2.0/24
+
+  server_gateway_ip:
+    type: string
+    label: SERVER subnet Network Gateway
+    description: The SERVER subnet gateway
+    default: 2.2.2.1
+
+  server_nameservers_ip:
+    type: string
+    label: SERVER nameservers
+    description: The SERVER nameservers
+    default: 8.8.8.8
+
+  ## CLIENT NET PARAMETERS
+  client_net_name:
+    type: string
+    label: CLIENT network name
+    description: The name for the network where the clients live
+    default: perf-test-client-net
+
+  client_subnet_name:
+    type: string
+    label: CLIENT subnet Name
+    description: The name for the subnet where the clients live
+    default: perf-test-client-subnet
+
+  client_cidr:
+    type: string
+    label: CLIENT subnet cidr
+    description: The CLIENT subnet network cidr
+    default: 1.1.1.0/24
+
+  client_gateway_ip:
+    type: string
+    label: CLIENT subnet Network Gateway
+    description: The CLIENT subnet gateway
+    default: 1.1.1.1
+
+  client_nameservers_ip:
+    type: string
+    label: CLIENT nameservers
+    description: The CLIENT nameservers
+    default: 8.8.8.8
+
+  ## COLLECTOR PARAMETERS
+  collector_ip:
+    type: string
+    label: COLLECTOR address
+    description: The address of the collector where the results are stored
+    default: 192.168.99.200
+
+  collector_username:
+    type: string
+    label: COLLECTOR username 
+    description: Username to be used in the collector for uploading the results
+    default: perftest
+
+  collector_password:
+    type: string
+    label: COLLECTOR password 
+    description: password to be used in the collector for uploading the results
+    default: perftest123
+
+  ## COMMON INSTANCE PARAMETERS
+  key:
+    type: string
+    label: Key name
+    description: Name of key-pair to be installed on instances for external access
+    default: keypair1
+
+  flavor_name:
+    type: string
+    label: flavor
+    description: Name of the flavor used for the instances
+    default: fer.small
+
+  image_location:
+    type: string
+    label: location
+    description: URL of the image to be used for the test
+    #default: http://uec-images.ubuntu.com/releases/14.04/release/ubuntu-14.04-server-cloudimg-i386-disk1.img
+    default: http://192.168.99.200/ubuntu-14.04-server-cloudimg-i386-disk1.img
+    #default: http://pubrepo2.plumgrid.com/img/testimage.qcow2
+
+  test_command:
+    type: string
+    label: test_command
+    description: Test command to run on the client
+    default: "iperf -i 2 -t 10 -c __server_ip__ >> /tmp/IPERF_RESULT.txt"
+
+############################################################################
+############################################################################
+resources:
+
+  ## SERVER NET RESOURCES
+  server-net:
+    #Network where server instances will live
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: server_net_name }
+
+  server-subnet:
+    #Subnet where server instances will live
+    type: OS::Neutron::Subnet
+    properties:
+      name: { get_param: server_subnet_name }
+      cidr: { get_param: server_cidr }
+      gateway_ip: { get_param: server_gateway_ip }
+      dns_nameservers: [ { get_param: server_nameservers_ip } ]
+      network: { get_resource: server-net }
+
+  ## CLIENT NET RESOURCES
+  client-net:
+    #Network where client instances will live
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: client_net_name }
+
+  client-subnet:
+    #Subnet where client instances will live
+    type: OS::Neutron::Subnet
+    properties:
+      name: { get_param: client_subnet_name }
+      cidr: { get_param: client_cidr }
+      gateway_ip: { get_param: client_gateway_ip }
+      dns_nameservers: [ { get_param: client_nameservers_ip } ]
+      network: { get_resource: client-net }
+
+  ## COMMON NET RESOURCES
+  router:
+    #router interconnecting server and client networks and providing external access
+    type: OS::Neutron::Router
+    properties:
+      name: { get_param: router_name }
+      external_gateway_info:
+        network: { get_param: net_ext_name }
+
+  client-router-interface:
+    #router interface in client network
+    type: OS::Neutron::RouterInterface
+    properties:
+      subnet: { get_resource: client-subnet }
+      router_id: { get_resource: router }
+
+  server-router-interface:
+    #router interface in server network
+    type: OS::Neutron::RouterInterface
+    properties:
+      subnet: { get_resource: server-subnet }
+      router_id: { get_resource: router }
+
+  perftest-security-group:
+    #Security group to be used in clients and servers to ensure that the right ports are open.
+    #Allows 5001-5011 for iperf. 22 for ssh from outside. Any from the clients private net.
+    #Establishing separate SGs for clients and servers produces a Circular Reference error.
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: perftest-security-group
+      rules:
+          #allow all from clients 
+          #"any" is apparently not supported
+        #- protocol: icmp
+        #  remote_mode: remote_group_id
+        - protocol: tcp
+          remote_mode: remote_group_id
+          port_range_min: 1
+          port_range_max: 65535
+        #- protocol: udp
+        #  remote_mode: remote_group_id
+        #  port_range_min: 1
+        #  port_range_max: 65535
+          #allow icmp, ssh and iperf from outside
+        - protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 1
+          port_range_max: 65535
+        #- protocol: tcp
+        #  remote_ip_prefix: 0.0.0.0/0
+        #  port_range_min: 5001
+        #  port_range_max: 5011
+        - protocol: icmp
+        - protocol: udp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 1
+          port_range_max: 65535
+        #- protocol: udp
+        #  remote_ip_prefix: 0.0.0.0/0
+        #  port_range_min: 53
+        #  port_range_max: 53
+
+  ## COMMON INSTANCE RESOURCES
+  image:
+    #Image to be used for clients and servers. Downloaded from public location.
+    type: OS::Glance::Image
+    properties:
+      name: perf-test-image
+      disk_format: qcow2
+      container_format: bare
+      location: { get_param: image_location }
+      is_public: yes
+      protected: no
+
+  #N/A Not supported in current code
+  #N/A wait_condition:
+  #N/A  #wait condition to be fulfilled before signalling back SUCCESS to the controller.
+  #N/A  type: OS::Heat::WaitCondition
+  #N/A  properties:
+  #N/A    handle: { get_resource: wait_handle }
+  #N/A    count: 1
+  #N/A    timeout: 120
+  #N/A
+  #N/A wait_handle:
+  #N/A  type: OS::Heat::WaitConditionHandle
+
+  ## SERVER INSTANCE RESOURCES
+  server-port:
+    #Port in the server instance to connect to the server network
+    #Created separately to apply security groups and have more control
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: server-net }
+      security_groups:
+        #The neutron backend will likely support a single SG per port.
+        #- default 
+        - { get_resource: perftest-security-group }
+
+  server-floatingip:
+    #floating IP to access the server from the outside world.
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: net_ext_name }
+
+  server-instance:
+    #the server instance itself.
+    type: OS::Nova::Server
+    properties:
+      image: { get_resource: image }
+      flavor: { get_param: flavor_name }
+      key_name: { get_param: key }
+      networks:
+       - port: { get_resource: server-port }
+      #use user_data to run a listening iperf server
+      user_data: |
+        #!/bin/sh
+        echo "Installing dependencies and starting listening server..."
+        # install dependencies
+        apt-get -y update
+        apt-get -y install iperf
+
+        # run the listening server
+        iperf -s &
+      user_data_format: RAW
+
+  server-floatingip-assoc:
+    #association between the server port and the floating ip
+    type: OS::Neutron::FloatingIPAssociation
+    properties: 
+      floatingip_id: { get_resource: server-floatingip }
+      port_id: { get_resource: server-port }
+
+  ## CLIENT INSTANCE RESOURCES
+  client-port:
+    #Port in the client instance to connect to the server network
+    #Created separately to apply security groups and have more control
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: client-net }
+      security_groups: 
+        #The neutron backend will likely support a single SG per port
+        #- default
+        - { get_resource: perftest-security-group }
+
+  client-floatingip:
+    #floating IP to access the server from the outside world.
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: net_ext_name }
+
+  client-instance:
+    #Client instance itself
+    type: OS::Nova::Server
+    properties:
+      image: { get_resource: image }
+      flavor: { get_param: flavor_name }
+      key_name: { get_param: key }
+      networks:
+        - port: { get_resource: client-port }
+      #use user data to launch an iperf test against the server
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          params:
+            __server_ip__: { get_attr: [ server-instance, first_address ] }
+            __server_cidr__: { get_param: server_cidr }
+            __test_command__: { get_param: test_command }
+            __collector_ip__: { get_param: collector_ip }
+            __collector_username__: { get_param: collector_username }
+            __collector_password__: { get_param: collector_password }
+            __floating_ip__: { get_attr: [ client-floatingip, floating_ip_address ] }
+          template: |
+            #!/bin/sh
+            
+            # install dependencies
+            apt-get -y update
+            apt-get -y install iperf sshpass
+
+            # calculate server's subnet
+            server_subnet=`echo __server_cidr__ | cut -d"." -f1-3`
+            # calculate my "host number" (last byte of the IP address)
+            host_number=`ip -o addr show dev "eth0" | awk '$3 == "inet" {print $4}' | sed -r 's!/.*!!; s!.*\.!!'`
+            # calculate server's subnet
+            server_address=$server_subnet"."$host_number
+            echo $server_address >> /tmp/server_ip_calculated.txt
+             # calculate server's subnet
+            #iperf -i 2 -t 10 -c __server_ip__ >> /tmp/IPERF_RESULT.txt
+            echo __test_command__ >> /tmp/test_command.txt
+            __test_command__
+            sshpass -p __collector_password__ scp -r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/IPERF_RESULT.txt __collector_username__@__collector_ip__:/home/perftest/__floating_ip__
+
+  client-floatingip-assoc:
+    #association between the client port and the floating ip
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: client-floatingip }
+      port_id: { get_resource: client-port }
+############################################################################
+############################################################################
+outputs:
+
+  client-net:
+    value: { get_attr: [ client-net, show ] }
+    description: Detailed information about the client network
+  client-subnet:
+    value: { get_attr: [ client-subnet, show ] }
+    description: Detailed information about the client subnet
+  server-net:
+    value: { get_attr: [ server-net, show ] }
+    description: Detailed information about the server network
+  server-subnet:
+    value: { get_attr: [ server-subnet, show ] }
+    description: Detailed information about the server subnet
+  router:
+    value: { get_attr: [ router, show ] }
+    description: Detailed information about the client router
+  client-image:
+    value: { get_param: [ image, id ] }
+    description: Detailed information about the image created
+  client-instance:
+    value: { get_attr: [ client-instance, show ] }
+    description: Detailed information about the Client instance
+  client-floatingip:
+    value: { get_attr: [ client-floatingip, floating_ip_address] }
+    description: Clients floating IP
+  server-instance:
+    value: {get_attr: [ server-instance, show ] }
+    description: Detailed information about the Server instance
+  server-floatingip:
+    value: { get_attr: [ server-floatingip, floating_ip_address ] }
+    description: Servers floating IP
+
+
